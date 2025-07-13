@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ETF Strategy Tester</title>
+
+  <!-- Chart.js core + date‑fns adapter for time‑axis -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+
+  <style>
+    body {font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 2rem; background:#f5f7fa; color:#222}
+    h1   {margin-bottom: .25rem}
+    .controls {display:flex; flex-wrap:wrap; gap:1rem; align-items:center}
+    label {font-size:.9rem; margin-right:.25rem}
+    button{background:#0066ff; color:#fff; border:none; padding:.5rem 1rem; border-radius:4px; cursor:pointer}
+    button:hover{background:#004fcc}
+    .stats {margin-top:1rem; font-size:.95rem}
+    .chart-wrapper{max-width:1000px; height:400px; margin-top:2rem}
+    
+    /* Add this to your existing style section */
+    .trade-log {
+      margin-top: 2rem;
+      max-width: 1000px;
+    }
+    .trade-log-container {
+      max-height: 500px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+    }
+    .trade-entry {
+      padding: 1rem;
+      border-bottom: 1px solid #eee;
+    }
+    .trade-entry:last-child {
+      border-bottom: none;
+    }
+    .trade-date {
+      font-weight: bold;
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+      color: #333;
+    }
+    .risk-status {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 3px;
+      margin-bottom: 0.5rem;
+      font-size: 0.85rem;
+      background: #f5f5f5;
+    }
+    .transaction-header {
+      font-weight: bold;
+      margin-top: 0.5rem;
+      margin-bottom: 0.25rem;
+      color: #666;
+      font-size: 0.9rem;
+    }
+    .transaction, .allocation {
+      margin-left: 1rem;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+    .sell-transactions .transaction {
+      color: #d32f2f;
+    }
+    .buy-transactions .transaction {
+      color: #388e3c;
+    }
+    .no-trades, .loading {
+      padding: 1rem;
+      color: #666;
+      font-style: italic;
+    }
+    /* Add to your existing style section */
+    .initial-allocation {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 3px;
+      margin-bottom: 0.5rem;
+      font-size: 0.85rem;
+      background: #e3f2fd;
+      color: #0d47a1;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>ETF Strategy Tester</h1>
+  <div class="controls">
+    <div>
+      <label for="strategySelect">Strategy:</label>
+      <select id="strategySelect">
+        <option value="dmr">1 – Dual Momentum Rotation</option>
+        <option value="barbell">2 – Leveraged 60/40 Barbell Trend</option>
+        <option value="turbo">3 – Turbo Triple‑Momentum Stack</option>
+      </select>
+    </div>
+    <div>
+      <label for="startDate">Start:</label>
+      <input type="date" id="startDate" value="1993-01-29" />
+    </div>
+    <div>
+      <label for="endDate">End:</label>
+      <input type="date" id="endDate" />
+    </div>
+    <button id="runBtn">Run Test</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div class="chart-wrapper"><canvas id="equityChart"></canvas></div>
+  
+  <!-- Add this right after the chart div -->
+  <div id="tradeLog" class="trade-log">
+    <h2>Trade Log</h2>
+    <div class="no-trades">Run a test to see trade details</div>
+  </div>
+
+<script>
+// ---------------- Utility helpers ----------------------------------
+function csvToSeries(csv){
+  const lines = csv.trim().split(/\n+/);
+  const out = [];
+  for(let i=1;i<lines.length;i++){
+    const [d,, , ,c,v] = lines[i].split(',');
+    const price = +c, vol = +v;
+    if(!isFinite(price)) continue;
+    out.push({date:new Date(d), close:price, vol:isFinite(vol)?vol:0});
+  }
+  return out.reverse(); // earliest first
+}
+
+// Add these utility functions for trade logging
+function formatDate(date) {
+  return date.toISOString().split('T')[0];
+}
+
+function formatCurrency(amount) {
+  return '$' + amount.toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+}
+
+function formatPercent(value) {
+  return (value * 100).toFixed(2) + '%';
+}
+
+async function fetchTicker(tk){
+  const r = await fetch(`proxy.php?symbol=${tk}.us`);
+  if(!r.ok) throw new Error('fetch ' + tk);
+  return csvToSeries(await r.text());
+}
+
+// Add a fetchTickerWithRetry function to handle rate limits
+async function fetchTickerWithRetry(tk, maxRetries = 3, delay = 1000) {
+  let retries = 0;
+  
+  while (retries < maxRetries) {
+    try {
+      // Add delay between requests
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      
+      const r = await fetch(`proxy.php?symbol=${tk}.us`);
+      if (!r.ok) {
+        if (r.status === 502) {
+          console.warn(`Rate limited for ${tk}, retrying in ${delay}ms...`);
+          retries++;
+          continue;
+        }
+        throw new Error('fetch ' + tk);
+      }
+      return csvToSeries(await r.text());
+    } catch (err) {
+      retries++;
+      if (retries >= maxRetries) throw err;
+    }
+  }
+}
+
+function sma(arr, i, len){
+  if(i < len-1) return null;
+  let s=0;
+  for(let k=i-len+1;k<=i;k++) s += arr[k].close;
+  return s/len;
+}
+function computeRSI(arr, len=14){
+  const res = new Array(arr.length).fill(null);
+  let g=0,l=0;
+  for(let i=1;i<len;i++){
+    const diff = arr[i].close - arr[i-1].close;
+    if(diff>=0) g += diff; else l -= diff;
+  }
+  for(let i=len;i<arr.length;i++){
+    const diff = arr[i].close - arr[i-1].close;
+    if(diff>=0){ g = (g*(len-1)+diff)/len; l = (l*(len-1))/len; }
+    else       { g = (g*(len-1))/len;       l = (l*(len-1)-diff)/len; }
+    const rs = l===0 ? 100 : g/l;
+    res[i] = 100 - 100/(1+rs);
+  }
+  return res;
+}
+function sliceByDate(arr, s, e){ return arr.filter(p=>p.date>=s && p.date<=e); }
+function alignSeries(obj){
+  const keys = Object.keys(obj);
+  const dateSets = keys.map(k=> new Set(obj[k].map(p=>+p.date)));
+  const common = [...dateSets.reduce((a,s)=>new Set([...a].filter(x=>s.has(x))))].sort((a,b)=>a-b);
+  const aligned = {};
+  keys.forEach(k=>{
+    const m = new Map(obj[k].map(p=>[+p.date,p]));
+    aligned[k] = common.map(ts=>m.get(ts));
+  });
+  return {dates:common.map(ts=>new Date(+ts)), series:aligned};
+}
+function calcCAGR(values, days){ const yrs = days/252; return Math.pow(values[values.length-1]/values[0], 1/yrs)-1; }
+function calcMaxDD(vals){ let peak=vals[0], dd=0; for(const v of vals){ if(v>peak) peak=v; dd=Math.min(dd,(v-peak)/peak);} return dd; }
+function avgDollarVol(arr, i, len=20){ if(i<len-1) return 0; let sum=0,count=0; for(let k=i-len+1;k<=i;k++){ const p=arr[k]; if(!p) continue; if(isFinite(p.close)&&isFinite(p.vol)){ sum += p.close*p.vol; count++; }} return count?sum/len:0; }
+
+// ---------------- Strategy engines --------------------------------
+function runDMR(aligned){
+  const {dates, series} = aligned;
+  const risk = ['spy','qqq','iwm'];
+  const def  = ['tlt','gld','shy'];
+  const perfW=21, smaL=200, eq=[100];
+  
+  // Create trade log array
+  const tradeLog = [];
+  let currentAllocation = {};
+  let initialAllocationDone = false;
+  
+  for(let i=1;i<dates.length;i++){
+    if(i<Math.max(perfW,smaL)){ eq.push(eq[i-1]); continue; }
+    
+    const ranks=risk.slice().sort((a,b)=> series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close);
+    const active = ranks.filter(tk=> series[tk][i].close > sma(series[tk], i, smaL));
+    const longs = (active.length?active:def).slice(0,2);
+    const w = 1/longs.length;
+    
+    // Create new allocation
+    const newAllocation = {};
+    longs.forEach(tk => newAllocation[tk] = w);
+    
+    // Handle initial allocation
+    if (!initialAllocationDone && i >= Math.max(perfW,smaL)) {
+      initialAllocationDone = true;
+      
+      // Create initial trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {},
+        isInitial: true
+      };
+      
+      // Record initial buys
+      longs.forEach(tk => {
+        const buyAmount = eq[i-1] * w;
+        entry.buys.push({
+          ticker: tk,
+          price: series[tk][i].close.toFixed(2),
+          amount: formatCurrency(buyAmount),
+          shares: (buyAmount / series[tk][i].close).toFixed(2)
+        });
+        
+        // Add to new allocation
+        entry.newAllocation[tk] = {
+          weight: formatPercent(w),
+          value: formatCurrency(eq[i-1] * w),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    // Compare current and new allocations for rebalances
+    else if (i > Math.max(perfW,smaL) && !compareAllocations(currentAllocation, newAllocation)) {
+      // Portfolio value before rebalance
+      const portfolioValue = eq[i-1];
+      
+      // Create trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {}
+      };
+      
+      // Record sells
+      Object.keys(currentAllocation).forEach(tk => {
+        if (!newAllocation[tk] || newAllocation[tk] < currentAllocation[tk]) {
+          const sellAmount = portfolioValue * (newAllocation[tk] || 0) - portfolioValue * currentAllocation[tk];
+          entry.sells.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(Math.abs(sellAmount)),
+            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record buys
+      Object.keys(newAllocation).forEach(tk => {
+        if (!currentAllocation[tk] || newAllocation[tk] > currentAllocation[tk]) {
+          const buyAmount = portfolioValue * newAllocation[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          entry.buys.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(buyAmount),
+            shares: (buyAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record new allocation
+      longs.forEach(tk => {
+        entry.newAllocation[tk] = {
+          weight: formatPercent(w),
+          value: formatCurrency(portfolioValue * w),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    
+    currentAllocation = {...newAllocation};
+    
+    let ret=0; longs.forEach(tk=> ret += w*(series[tk][i].close/series[tk][i-1].close - 1));
+    eq.push(eq[i-1]*(1+ret));
+  }
+  
+  return {dates, equity:eq, tradeLog};
+}
+
+function runBarbell(aligned){
+  const {dates, series} = aligned;
+  const spyRSI = computeRSI(series['spy']);
+  const smaL=100, eq=[100];
+  
+  // Create trade log array
+  const tradeLog = [];
+  let currentAllocation = {};
+  let initialAllocationDone = false;
+  
+  for(let i=1;i<dates.length;i++){
+    if(i<smaL || spyRSI[i]===null){ eq.push(eq[i-1]); continue; }
+    
+    const spyClose=series['spy'][i].close, spySMA=sma(series['spy'],i,smaL);
+    const tltClose=series['tlt'][i].close, tltSMA=sma(series['tlt'],i,smaL);
+    const weights={};
+    
+    if(spyClose<spySMA || spyRSI[i]<40){ weights['upro']=0.30; weights['splv']=0.30; } else { weights['upro']=0.60; }
+    if(tltClose<tltSMA){ weights['shy']=0.40; } else { weights['tmf']=0.40; }
+    
+    // Handle initial allocation
+    if (!initialAllocationDone && i >= smaL) {
+      initialAllocationDone = true;
+      
+      // Create initial trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {},
+        isInitial: true
+      };
+      
+      // Record initial buys
+      Object.keys(weights).forEach(tk => {
+        const buyAmount = eq[i-1] * weights[tk];
+        entry.buys.push({
+          ticker: tk,
+          price: series[tk][i].close.toFixed(2),
+          amount: formatCurrency(buyAmount),
+          shares: (buyAmount / series[tk][i].close).toFixed(2)
+        });
+        
+        // Add to new allocation
+        entry.newAllocation[tk] = {
+          weight: formatPercent(weights[tk]),
+          value: formatCurrency(eq[i-1] * weights[tk]),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    // Check if allocation changed for rebalances
+    else if (i > smaL && !compareAllocations(currentAllocation, weights)) {
+      // Portfolio value before rebalance
+      const portfolioValue = eq[i-1];
+      
+      // Create trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {}
+      };
+      
+      // Record sells
+      Object.keys(currentAllocation).forEach(tk => {
+        if (!weights[tk] || weights[tk] < currentAllocation[tk]) {
+          const sellAmount = portfolioValue * (weights[tk] || 0) - portfolioValue * currentAllocation[tk];
+          entry.sells.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(Math.abs(sellAmount)),
+            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record buys
+      Object.keys(weights).forEach(tk => {
+        if (!currentAllocation[tk] || weights[tk] > currentAllocation[tk]) {
+          const buyAmount = portfolioValue * weights[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          entry.buys.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(buyAmount),
+            shares: (buyAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record new allocation
+      Object.keys(weights).forEach(tk => {
+        entry.newAllocation[tk] = {
+          weight: formatPercent(weights[tk]),
+          value: formatCurrency(portfolioValue * weights[tk]),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    
+    currentAllocation = {...weights};
+    
+    let ret=0; Object.keys(weights).forEach(tk=> ret += weights[tk]*(series[tk][i].close/series[tk][i-1].close -1));
+    eq.push(eq[i-1]*(1+ret));
+  }
+  
+  return {dates, equity:eq, tradeLog};
+}
+
+function runTurbo(aligned){
+  const {dates, series} = aligned;
+  const universe = Object.keys(series).filter(tk => !['spy','tlt','tmf','shy'].includes(tk));
+  const spy=series['spy']; const spyRSI = computeRSI(spy);
+  const smaL=200, perfW=21, liqThresh=5e6, eq=[100];
+  
+  // Create trade log array
+  const tradeLog = [];
+  let currentAllocation = {};
+  let initialAllocationDone = false;
+
+  for(let i=1;i<dates.length;i++){
+    if(i<Math.max(smaL,perfW)){ eq.push(eq[i-1]); continue; }
+    let riskOn = spy[i].close > sma(spy,i,smaL) && spyRSI[i] >= 45;
+
+    // liquid tradables
+    let tradables = universe.filter(tk=> series[tk] && series[tk][i]);
+    tradables = tradables.filter(tk=> avgDollarVol(series[tk], i, 20) > liqThresh);
+
+    tradables.sort((a,b)=> series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close);
+
+    if(riskOn && tradables.length<2) riskOn=false; // no liquid names => risk off
+
+    let longs;
+    if(riskOn){ longs = tradables.slice(0,2); }
+    else       { longs = ['tmf','shy']; }
+
+    const w = 1/longs.length;
+    
+    // Create new allocation
+    const newAllocation = {};
+    longs.forEach(tk => newAllocation[tk] = w);
+    
+    // Handle initial allocation
+    if (!initialAllocationDone && i >= Math.max(smaL, perfW)) {
+      initialAllocationDone = true;
+      
+      // Create initial trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {},
+        riskOn: riskOn,
+        isInitial: true
+      };
+      
+      // Record initial buys
+      longs.forEach(tk => {
+        const buyAmount = eq[i-1] * w;
+        entry.buys.push({
+          ticker: tk,
+          price: series[tk][i].close.toFixed(2),
+          amount: formatCurrency(buyAmount),
+          shares: (buyAmount / series[tk][i].close).toFixed(2)
+        });
+        
+        // Add to new allocation
+        entry.newAllocation[tk] = {
+          weight: formatPercent(w),
+          value: formatCurrency(eq[i-1] * w),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    // Check if allocation changed for rebalances
+    else if (i > Math.max(smaL, perfW) && !compareAllocations(currentAllocation, newAllocation)) {
+      // Portfolio value before rebalance
+      const portfolioValue = eq[i-1];
+      
+      // Create trade log entry
+      const entry = {
+        date: formatDate(dates[i]),
+        sells: [],
+        buys: [],
+        newAllocation: {},
+        riskOn: riskOn
+      };
+      
+      // Record sells
+      Object.keys(currentAllocation).forEach(tk => {
+        if (!newAllocation[tk] || newAllocation[tk] < currentAllocation[tk]) {
+          const sellAmount = portfolioValue * (newAllocation[tk] || 0) - portfolioValue * currentAllocation[tk];
+          entry.sells.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(Math.abs(sellAmount)),
+            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record buys
+      Object.keys(newAllocation).forEach(tk => {
+        if (!currentAllocation[tk] || newAllocation[tk] > currentAllocation[tk]) {
+          const buyAmount = portfolioValue * newAllocation[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          entry.buys.push({
+            ticker: tk,
+            price: series[tk][i].close.toFixed(2),
+            amount: formatCurrency(buyAmount),
+            shares: (buyAmount / series[tk][i].close).toFixed(2)
+          });
+        }
+      });
+      
+      // Record new allocation
+      longs.forEach(tk => {
+        entry.newAllocation[tk] = {
+          weight: formatPercent(w),
+          value: formatCurrency(portfolioValue * w),
+          price: series[tk][i].close.toFixed(2)
+        };
+      });
+      
+      tradeLog.push(entry);
+    }
+    
+    currentAllocation = {...newAllocation};
+    
+    let ret = 0;
+    longs.forEach(tk=> ret += w*(series[tk][i].close/series[tk][i-1].close -1));
+    eq.push(eq[i-1]*(1+ret));
+  }
+  
+  return {dates, equity:eq, tradeLog};
+}
+
+// Helper function to compare allocations
+function compareAllocations(a, b) {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  
+  if (keysA.length !== keysB.length) return false;
+  
+  for (const key of keysA) {
+    if (!b.hasOwnProperty(key) || Math.abs(a[key] - b[key]) > 0.001) return false;
+  }
+  
+  return true;
+}
+
+// ---------------- Main run routine --------------------------------
+async function runTest(){
+  const strat = document.getElementById('strategySelect').value;
+  const start = new Date(document.getElementById('startDate').value);
+  const endInput = document.getElementById('endDate').value;
+  const end   = endInput ? new Date(endInput) : new Date();
+
+  const tickersDMR     = ['spy','qqq','iwm','tlt','gld','shy'];
+  const tickersBarbell = ['upro','splv','tmf','shy','spy','tlt'];
+  const tickersTurbo   = ['soxl','tecl','fngu','tqqq','upro','labu','webl','retl','want','dfen','udow','tmf','shy','spy','tlt'];
+
+  const tickers = strat==='dmr' ? tickersDMR : strat==='barbell' ? tickersBarbell : tickersTurbo;
+
+  // Clear previous trade log if it exists
+  document.getElementById('tradeLog').innerHTML = '<h2>Trade Log</h2><div class="loading">Loading...</div>';
+
+  const byTk={};
+  // Use sequential fetches with delay to avoid rate limits
+  for (const tk of tickers) {
+    try {
+      byTk[tk] = sliceByDate(await fetchTickerWithRetry(tk), start, end);
+      // Add small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (e) {
+      console.error(`Error fetching ${tk}:`, e);
+    }
+  }
+
+  // Remove very new ETFs with < 250 trading days so they don't shrink the common date set
+  if(strat==='turbo'){
+    Object.keys(byTk).forEach(tk=>{ if(byTk[tk].length < 250) delete byTk[tk]; });
+  }
+  
+  const aligned = alignSeries(byTk);
+  let result;
+  if(strat==='dmr')      result = runDMR(aligned);
+  else if(strat==='barbell') result = runBarbell(aligned);
+  else                    result = runTurbo(aligned);
+
+  // metrics
+  const days=result.dates.length;
+  const cagr=calcCAGR(result.equity, days);
+  const maxDD=calcMaxDD(result.equity);
+  const dailyRet=[]; for(let i=1;i<result.equity.length;i++) dailyRet.push(result.equity[i]/result.equity[i-1]-1);
+  const avgRet=dailyRet.reduce((s,r)=>s+r,0)/dailyRet.length;
+  const varRet=dailyRet.reduce((s,r)=>s+Math.pow(r-avgRet,2),0)/dailyRet.length;
+  const stdDev=Math.sqrt(varRet);
+  const negRet=dailyRet.filter(r=>r<0);
+  const downVar=negRet.reduce((s,r)=>s+Math.pow(r,2),0)/dailyRet.length;
+  const downDev=Math.sqrt(downVar);
+  const annRet=cagr;
+  const annStd=stdDev*Math.sqrt(252);
+  const sharpe=annRet/annStd;
+  const sortino=annRet/(downDev*Math.sqrt(252));
+  const calmar=annRet/Math.abs(maxDD);
+
+  document.getElementById('stats').innerHTML =
+    `<strong>Annualized Return:</strong> ${(annRet*100).toFixed(2)}% &nbsp;|&nbsp; `+
+    `<strong>Max Drawdown:</strong> ${(maxDD*100).toFixed(2)}% &nbsp;|&nbsp; `+
+    `<strong>Sharpe:</strong> ${sharpe.toFixed(2)} &nbsp;|&nbsp; `+
+    `<strong>Sortino:</strong> ${sortino.toFixed(2)} &nbsp;|&nbsp; `+
+    `<strong>Calmar:</strong> ${calmar.toFixed(2)}`;
+
+  // chart
+  if(window.equityChartInstance) window.equityChartInstance.destroy();
+  const ctx=document.getElementById('equityChart').getContext('2d');
+  window.equityChartInstance = new Chart(ctx, {
+    type:'line',
+    data:{
+      labels:result.dates,
+      datasets:[{
+        label: strat==='dmr'?'Dual Momentum': strat==='barbell'?'Barbell Trend':'Turbo 3× Momentum',
+        data:result.equity,
+        borderWidth:1,
+        fill:false,
+        pointRadius:0
+      }]
+    },
+    options:{ responsive:true, maintainAspectRatio:false, scales:{ x:{ type:'time' }, y:{ type:'linear' } } }
+  });
+  
+  // Render trade log
+  renderTradeLog(result.tradeLog);
+}
+
+// Function to render the trade log
+function renderTradeLog(tradeLog) {
+  const tradeLogEl = document.getElementById('tradeLog');
+  
+  if (!tradeLog || tradeLog.length === 0) {
+    tradeLogEl.innerHTML = '<h2>Trade Log</h2><div class="no-trades">No trades in selected period</div>';
+    return;
+  }
+  
+  let html = '<h2>Trade Log</h2>';
+  html += '<div class="trade-log-container">';
+  
+  tradeLog.forEach(entry => {
+    html += `<div class="trade-entry">`;
+    html += `<div class="trade-date">${entry.date}</div>`;
+    
+    if (entry.isInitial) {
+      html += `<div class="initial-allocation">INITIAL ALLOCATION</div>`;
+    }
+    
+    if (entry.hasOwnProperty('riskOn')) {
+      html += `<div class="risk-status">Risk ${entry.riskOn ? 'ON' : 'OFF'}</div>`;
+    }
+    
+    if (entry.sells.length > 0) {
+      html += `<div class="sell-transactions">`;
+      html += `<div class="transaction-header">SELLS</div>`;
+      entry.sells.forEach(sell => {
+        html += `<div class="transaction">Sell ${sell.shares} shares of ${sell.ticker.toUpperCase()} @ ${sell.price} (${sell.amount})</div>`;
+      });
+      html += `</div>`;
+    }
+    
+    if (entry.buys.length > 0) {
+      html += `<div class="buy-transactions">`;
+      html += `<div class="transaction-header">BUYS</div>`;
+      entry.buys.forEach(buy => {
+        html += `<div class="transaction">Buy ${buy.shares} shares of ${buy.ticker.toUpperCase()} @ ${buy.price} (${buy.amount})</div>`;
+      });
+      html += `</div>`;
+    }
+    
+    html += `<div class="new-allocation">`;
+    html += `<div class="transaction-header">NEW ALLOCATION</div>`;
+    Object.keys(entry.newAllocation).forEach(tk => {
+      const alloc = entry.newAllocation[tk];
+      html += `<div class="allocation">${tk.toUpperCase()}: ${alloc.weight} (${alloc.value}) @ ${alloc.price}</div>`;
+    });
+    html += `</div>`;
+    
+    html += `</div>`;
+  });
+  
+  html += '</div>';
+  tradeLogEl.innerHTML = html;
+}
+
+// init
+ document.getElementById('endDate').valueAsDate = new Date();
+ document.getElementById('runBtn').onclick = () => { document.getElementById('stats').textContent='Running…'; runTest().catch(e=>{ document.getElementById('stats').textContent='Error: '+e.message; console.error(e);}); };
+</script>
+</body>
+</html>
