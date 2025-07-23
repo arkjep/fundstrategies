@@ -1,0 +1,3 @@
+# Ignore cache folder and all contents
+/cache/
+/cache/*

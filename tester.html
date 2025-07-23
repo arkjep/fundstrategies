@@ -152,7 +152,7 @@ async function fetchTicker(tk){
   return csvToSeries(await r.text());
 }
 
-// Add a fetchTickerWithRetry function to handle rate limits
+// Replace the fetchTickerWithRetry function with this updated version
 async function fetchTickerWithRetry(tk, maxRetries = 3, delay = 1000) {
   let retries = 0;
   
@@ -163,6 +163,7 @@ async function fetchTickerWithRetry(tk, maxRetries = 3, delay = 1000) {
         await new Promise(resolve => setTimeout(resolve, delay));
       }
       
+      // Modified to fetch more historical data than needed to ensure enough for indicators
       const r = await fetch(`proxy.php?symbol=${tk}.us`);
       if (!r.ok) {
         if (r.status === 502) {
@@ -219,19 +220,30 @@ function calcMaxDD(vals){ let peak=vals[0], dd=0; for(const v of vals){ if(v>pea
 function avgDollarVol(arr, i, len=20){ if(i<len-1) return 0; let sum=0,count=0; for(let k=i-len+1;k<=i;k++){ const p=arr[k]; if(!p) continue; if(isFinite(p.close)&&isFinite(p.vol)){ sum += p.close*p.vol; count++; }} return count?sum/len:0; }
 
 // ---------------- Strategy engines --------------------------------
-function runDMR(aligned){
+function runDMR(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const risk = ['spy','qqq','iwm'];
   const def  = ['tlt','gld','shy'];
-  const perfW=21, smaL=200, eq=[100];
+  const perfW=21, smaL=200;
+  
+  // Initialize equity array
+  const eq = [];
+  eq[userStartIndex] = 100;
   
   // Create trade log array
   const tradeLog = [];
   let currentAllocation = {};
   let initialAllocationDone = false;
   
-  for(let i=1;i<dates.length;i++){
-    if(i<Math.max(perfW,smaL)){ eq.push(eq[i-1]); continue; }
+  // Calculate full equity curve but only start from userStartIndex
+  for(let i=1; i<dates.length; i++){
+    if(i <= userStartIndex) continue;
+    
+    // For days before we have enough history for indicators, just copy previous equity value
+    if(i-userStartIndex < Math.max(perfW, smaL)){ 
+      eq[i] = eq[i-1]; 
+      continue; 
+    }
     
     const ranks=risk.slice().sort((a,b)=> series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close);
     const active = ranks.filter(tk=> series[tk][i].close > sma(series[tk], i, smaL));
@@ -242,8 +254,8 @@ function runDMR(aligned){
     const newAllocation = {};
     longs.forEach(tk => newAllocation[tk] = w);
     
-    // Handle initial allocation
-    if (!initialAllocationDone && i >= Math.max(perfW,smaL)) {
+    // Handle initial allocation - now based on having enough data points from user start date
+    if (!initialAllocationDone && i-userStartIndex >= Math.max(perfW,smaL)) {
       initialAllocationDone = true;
       
       // Create initial trade log entry
@@ -335,7 +347,7 @@ function runDMR(aligned){
   return {dates, equity:eq, tradeLog};
 }
 
-function runBarbell(aligned){
+function runBarbell(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const spyRSI = computeRSI(series['spy']);
   const smaL=100, eq=[100];
@@ -448,7 +460,7 @@ function runBarbell(aligned){
   return {dates, equity:eq, tradeLog};
 }
 
-function runTurbo(aligned){
+function runTurbo(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const universe = Object.keys(series).filter(tk => !['spy','tlt','tmf','shy'].includes(tk));
   const spy=series['spy']; const spyRSI = computeRSI(spy);
@@ -594,9 +606,22 @@ function compareAllocations(a, b) {
 // ---------------- Main run routine --------------------------------
 async function runTest(){
   const strat = document.getElementById('strategySelect').value;
-  const start = new Date(document.getElementById('startDate').value);
+  const startDate = new Date(document.getElementById('startDate').value);
   const endInput = document.getElementById('endDate').value;
-  const end   = endInput ? new Date(endInput) : new Date();
+  const endDate = endInput ? new Date(endInput) : new Date();
+
+  // Define lookback periods for each strategy
+  const lookbackPeriods = {
+    'dmr': 200,     // Maximum of SMA200 and 21-day momentum window
+    'barbell': 100, // SMA100 for barbell
+    'turbo': 200    // Maximum of SMA200 and 21-day momentum window
+  };
+  
+  // Calculate the fetch start date (earlier than user's start date)
+  const lookbackDays = lookbackPeriods[strat];
+  const fetchStartDate = new Date(startDate);
+  // Move back by approximately lookbackDays trading days (multiply by 1.4 to account for weekends/holidays)
+  fetchStartDate.setDate(fetchStartDate.getDate() - Math.ceil(lookbackDays * 1.4));
 
   const tickersDMR     = ['spy','qqq','iwm','tlt','gld','shy'];
   const tickersBarbell = ['upro','splv','tmf','shy','spy','tlt'];
@@ -611,7 +636,9 @@ async function runTest(){
   // Use sequential fetches with delay to avoid rate limits
   for (const tk of tickers) {
     try {
-      byTk[tk] = sliceByDate(await fetchTickerWithRetry(tk), start, end);
+      // Fetch from our calculated fetch start date, not user's start date
+      const fullData = await fetchTickerWithRetry(tk);
+      byTk[tk] = sliceByDate(fullData, fetchStartDate, endDate);
       // Add small delay between requests
       await new Promise(resolve => setTimeout(resolve, 300));
     } catch (e) {
@@ -625,16 +652,22 @@ async function runTest(){
   }
   
   const aligned = alignSeries(byTk);
+  
+  // Find the index in aligned.dates that corresponds to the user's start date
+  const userStartIndex = aligned.dates.findIndex(date => date >= startDate);
+  
+  // Pass all data to strategy, but tell it when to start showing results
   let result;
-  if(strat==='dmr')      result = runDMR(aligned);
-  else if(strat==='barbell') result = runBarbell(aligned);
-  else                    result = runTurbo(aligned);
+  if(strat==='dmr')      result = runDMR(aligned, userStartIndex);
+  else if(strat==='barbell') result = runBarbell(aligned, userStartIndex);
+  else                    result = runTurbo(aligned, userStartIndex);
 
-  // metrics
-  const days=result.dates.length;
-  const cagr=calcCAGR(result.equity, days);
-  const maxDD=calcMaxDD(result.equity);
-  const dailyRet=[]; for(let i=1;i<result.equity.length;i++) dailyRet.push(result.equity[i]/result.equity[i-1]-1);
+  // metrics - only calculate based on visible equity curve
+  const days = result.dates.length;
+  const cagr = calcCAGR(result.equity, days);
+  const maxDD = calcMaxDD(result.equity);
+  const dailyRet = []; 
+  for(let i=1; i<result.equity.length; i++) dailyRet.push(result.equity[i]/result.equity[i-1]-1);
   const avgRet=dailyRet.reduce((s,r)=>s+r,0)/dailyRet.length;
   const varRet=dailyRet.reduce((s,r)=>s+Math.pow(r-avgRet,2),0)/dailyRet.length;
   const stdDev=Math.sqrt(varRet);
