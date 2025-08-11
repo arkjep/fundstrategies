@@ -914,9 +914,34 @@ function renderTradeLog(tradeLog) {
   tradeLogEl.innerHTML = html;
 }
 
+function toggleLoadingState(isLoading) {
+  const chartWrapper = document.querySelector('.chart-wrapper');
+  const tradeLogEl = document.getElementById('tradeLog');
+  const statsEl = document.getElementById('stats');
+  
+  if (isLoading) {
+    // Hide chart and trade log, show loading message
+    chartWrapper.style.display = 'none';
+    statsEl.textContent = 'Running…';
+    tradeLogEl.innerHTML = '<h2>Trade Log</h2><div class="loading">Loading...</div>';
+  } else {
+    // Show chart again when done
+    chartWrapper.style.display = 'block';
+  }
+}
+
 // init
- document.getElementById('endDate').valueAsDate = new Date();
- document.getElementById('runBtn').onclick = () => { document.getElementById('stats').textContent='Running…'; runTest().catch(e=>{ document.getElementById('stats').textContent='Error: '+e.message; console.error(e);}); };
+document.getElementById('endDate').valueAsDate = new Date();
+document.getElementById('runBtn').onclick = () => { 
+  toggleLoadingState(true);
+  runTest()
+    .then(() => toggleLoadingState(false))
+    .catch(e => { 
+      document.getElementById('stats').textContent = 'Error: ' + e.message; 
+      console.error(e);
+      toggleLoadingState(false);
+    }); 
+};
 </script>
 </body>
 </html>
