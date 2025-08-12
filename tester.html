@@ -108,6 +108,13 @@
       <label for="endDate">End:</label>
       <input type="date" id="endDate" />
     </div>
+    <div>
+      <label for="executionToggle">Execution:</label>
+      <select id="executionToggle">
+        <option value="close">Signal & Execute at Close</option>
+        <option value="open">Signal & Execute at Open</option>
+      </select>
+    </div>
     <button id="runBtn">Run Test</button>
   </div>
 
@@ -126,10 +133,10 @@ function csvToSeries(csv){
   const lines = csv.trim().split(/\n+/);
   const out = [];
   for(let i=1;i<lines.length;i++){
-    const [d,, , ,c,v] = lines[i].split(',');
-    const price = +c, vol = +v;
+    const [d,o,h,l,c,v] = lines[i].split(',');
+    const price = +c, open = +o, vol = +v;
     if(!isFinite(price)) continue;
-    out.push({date:new Date(d), close:price, vol:isFinite(vol)?vol:0});
+    out.push({date:new Date(d), open:open, close:price, vol:isFinite(vol)?vol:0});
   }
   return out.reverse(); // earliest first
 }
@@ -227,6 +234,9 @@ function runDMR(aligned, userStartIndex = 0){
   const def  = ['tlt','gld','shy'];
   const perfW=21, smaL=200;
   
+  // Get execution mode from toggle
+  const executionMode = document.getElementById('executionToggle').value;
+  
   // Initialize equity array
   const eq = [];
   eq[userStartIndex] = 100;
@@ -238,7 +248,10 @@ function runDMR(aligned, userStartIndex = 0){
   
   // Calculate full equity curve but only start from userStartIndex
   for(let i=1; i<dates.length; i++){
-    if(i <= userStartIndex) continue;
+    if(i <= userStartIndex) {
+      eq[i] = 100; // Initialize early values to 100
+      continue;
+    }
     
     // For days before we have enough history for indicators, just copy previous equity value
     if(i-userStartIndex < Math.max(perfW, smaL)){ 
@@ -246,16 +259,24 @@ function runDMR(aligned, userStartIndex = 0){
       continue; 
     }
     
-    const ranks=risk.slice().sort((a,b)=> series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close);
-    const active = ranks.filter(tk=> series[tk][i].close > sma(series[tk], i, smaL));
-    const longs = (active.length?active:def).slice(0,2);
+    // Choose which price to use for execution
+    const priceKey = executionMode === 'close' ? 'close' : 'open';
+    
+    // Calculate momentum using close prices (standard)
+    const ranks = risk.slice().sort((a,b) => 
+      series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close
+    );
+    
+    // Calculate SMAs using close prices (standard)
+    const active = ranks.filter(tk => series[tk][i][priceKey] > sma(series[tk], i, smaL));
+    const longs = (active.length ? active : def).slice(0,2);
     const w = 1/longs.length;
     
     // Create new allocation
     const newAllocation = {};
     longs.forEach(tk => newAllocation[tk] = w);
     
-    // Handle initial allocation - now based on having enough data points from user start date
+    // Handle initial allocation
     if (!initialAllocationDone && i-userStartIndex >= Math.max(perfW,smaL)) {
       initialAllocationDone = true;
       
@@ -265,24 +286,26 @@ function runDMR(aligned, userStartIndex = 0){
         sells: [],
         buys: [],
         newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open",
         isInitial: true
       };
       
       // Record initial buys
       longs.forEach(tk => {
         const buyAmount = eq[i-1] * w;
+        const price = series[tk][i][priceKey];
         entry.buys.push({
           ticker: tk,
-          price: series[tk][i].close.toFixed(2),
+          price: price.toFixed(2),
           amount: formatCurrency(buyAmount),
-          shares: (buyAmount / series[tk][i].close).toFixed(2)
+          shares: (buyAmount / price).toFixed(2)
         });
         
         // Add to new allocation
         entry.newAllocation[tk] = {
           weight: formatPercent(w),
           value: formatCurrency(eq[i-1] * w),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
@@ -298,18 +321,20 @@ function runDMR(aligned, userStartIndex = 0){
         date: formatDate(dates[i]),
         sells: [],
         buys: [],
-        newAllocation: {}
+        newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open"
       };
       
       // Record sells
       Object.keys(currentAllocation).forEach(tk => {
         if (!newAllocation[tk] || newAllocation[tk] < currentAllocation[tk]) {
           const sellAmount = portfolioValue * (newAllocation[tk] || 0) - portfolioValue * currentAllocation[tk];
+          const price = series[tk][i][priceKey];
           entry.sells.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(Math.abs(sellAmount)),
-            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+            shares: Math.abs(sellAmount / price).toFixed(2)
           });
         }
       });
@@ -318,21 +343,23 @@ function runDMR(aligned, userStartIndex = 0){
       Object.keys(newAllocation).forEach(tk => {
         if (!currentAllocation[tk] || newAllocation[tk] > currentAllocation[tk]) {
           const buyAmount = portfolioValue * newAllocation[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          const price = series[tk][i][priceKey];
           entry.buys.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(buyAmount),
-            shares: (buyAmount / series[tk][i].close).toFixed(2)
+            shares: (buyAmount / price).toFixed(2)
           });
         }
       });
       
       // Record new allocation
       longs.forEach(tk => {
+        const price = series[tk][i][priceKey];
         entry.newAllocation[tk] = {
           weight: formatPercent(w),
           value: formatCurrency(portfolioValue * w),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
@@ -341,8 +368,28 @@ function runDMR(aligned, userStartIndex = 0){
     
     currentAllocation = {...newAllocation};
     
-    let ret=0; longs.forEach(tk=> ret += w*(series[tk][i].close/series[tk][i-1].close - 1));
-    eq.push(eq[i-1]*(1+ret));
+    // Calculate returns based on execution mode
+    let ret = 0;
+    if (executionMode === 'close') {
+      // For close execution, use close-to-close returns
+      longs.forEach(tk => {
+        ret += w * (series[tk][i].close / series[tk][i-1].close - 1);
+      });
+    } else {
+      // For open execution, use open-to-open returns
+      if (i > 1) {
+        longs.forEach(tk => {
+          ret += w * (series[tk][i].open / series[tk][i-1].open - 1);
+        });
+      } else {
+        // For the first day, use previous close to current open
+        longs.forEach(tk => {
+          ret += w * (series[tk][i].open / series[tk][i-1].close - 1);
+        });
+      }
+    }
+    
+    eq[i] = eq[i-1] * (1 + ret);
   }
   
   return {dates, equity:eq, tradeLog};
@@ -351,22 +398,59 @@ function runDMR(aligned, userStartIndex = 0){
 function runBarbell(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const spyRSI = computeRSI(series['spy']);
-  const smaL=100, eq=[100];
+  const smaL=100;
+  
+  // Get execution mode from toggle
+  const executionMode = document.getElementById('executionToggle').value;
+  
+  // Initialize equity array
+  const eq = [];
+  eq[userStartIndex] = 100;
   
   // Create trade log array
   const tradeLog = [];
   let currentAllocation = {};
   let initialAllocationDone = false;
   
-  for(let i=1;i<dates.length;i++){
-    if(i<smaL || spyRSI[i]===null){ eq.push(eq[i-1]); continue; }
+  // Calculate full equity curve but only start from userStartIndex
+  for(let i=1; i<dates.length; i++){
+    if(i <= userStartIndex) {
+      eq[i] = 100; // Initialize early values to 100
+      continue;
+    }
     
-    const spyClose=series['spy'][i].close, spySMA=sma(series['spy'],i,smaL);
-    const tltClose=series['tlt'][i].close, tltSMA=sma(series['tlt'],i,smaL);
-    const weights={};
+    // For days before we have enough history for indicators, just copy previous equity value
+    if(i < smaL || spyRSI[i] === null){ 
+      eq[i] = eq[i-1]; 
+      continue; 
+    }
     
-    if(spyClose<spySMA || spyRSI[i]<40){ weights['upro']=0.30; weights['splv']=0.30; } else { weights['upro']=0.60; }
-    if(tltClose<tltSMA){ weights['shy']=0.40; } else { weights['tmf']=0.40; }
+    // Choose which price to use for signal generation and execution
+    const priceKey = executionMode === 'close' ? 'close' : 'open';
+    
+    // Use standard SMA calculation based on close prices
+    const spySMA = sma(series['spy'], i, smaL);
+    const tltSMA = sma(series['tlt'], i, smaL);
+    
+    // But compare against current day's open or close price based on execution mode
+    const spyPrice = series['spy'][i][priceKey];
+    const tltPrice = series['tlt'][i][priceKey];
+    
+    // Calculate the allocation
+    const weights = {};
+    
+    if(spyPrice < spySMA || spyRSI[i] < 40){ 
+      weights['upro'] = 0.30; 
+      weights['splv'] = 0.30; 
+    } else { 
+      weights['upro'] = 0.60; 
+    }
+    
+    if(tltPrice < tltSMA){ 
+      weights['shy'] = 0.40; 
+    } else { 
+      weights['tmf'] = 0.40; 
+    }
     
     // Handle initial allocation
     if (!initialAllocationDone && i >= smaL) {
@@ -378,28 +462,31 @@ function runBarbell(aligned, userStartIndex = 0){
         sells: [],
         buys: [],
         newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open",
         isInitial: true
       };
       
-      // Record initial buys
+      // Record initial buys at current price
       Object.keys(weights).forEach(tk => {
         const buyAmount = eq[i-1] * weights[tk];
+        const price = series[tk][i][priceKey];
         entry.buys.push({
           ticker: tk,
-          price: series[tk][i].close.toFixed(2),
+          price: price.toFixed(2),
           amount: formatCurrency(buyAmount),
-          shares: (buyAmount / series[tk][i].close).toFixed(2)
+          shares: (buyAmount / price).toFixed(2)
         });
         
         // Add to new allocation
         entry.newAllocation[tk] = {
           weight: formatPercent(weights[tk]),
           value: formatCurrency(eq[i-1] * weights[tk]),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
       tradeLog.push(entry);
+      currentAllocation = {...weights};
     }
     // Check if allocation changed for rebalances
     else if (i > smaL && !compareAllocations(currentAllocation, weights)) {
@@ -411,51 +498,74 @@ function runBarbell(aligned, userStartIndex = 0){
         date: formatDate(dates[i]),
         sells: [],
         buys: [],
-        newAllocation: {}
+        newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open"
       };
       
-      // Record sells
+      // Record sells at current price
       Object.keys(currentAllocation).forEach(tk => {
         if (!weights[tk] || weights[tk] < currentAllocation[tk]) {
           const sellAmount = portfolioValue * (weights[tk] || 0) - portfolioValue * currentAllocation[tk];
+          const price = series[tk][i][priceKey];
           entry.sells.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(Math.abs(sellAmount)),
-            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+            shares: Math.abs(sellAmount / price).toFixed(2)
           });
         }
       });
       
-      // Record buys
+      // Record buys at current price
       Object.keys(weights).forEach(tk => {
         if (!currentAllocation[tk] || weights[tk] > currentAllocation[tk]) {
           const buyAmount = portfolioValue * weights[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          const price = series[tk][i][priceKey];
           entry.buys.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(buyAmount),
-            shares: (buyAmount / series[tk][i].close).toFixed(2)
+            shares: (buyAmount / price).toFixed(2)
           });
         }
       });
       
       // Record new allocation
       Object.keys(weights).forEach(tk => {
+        const price = series[tk][i][priceKey];
         entry.newAllocation[tk] = {
           weight: formatPercent(weights[tk]),
           value: formatCurrency(portfolioValue * weights[tk]),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
       tradeLog.push(entry);
+      currentAllocation = {...weights};
     }
     
-    currentAllocation = {...weights};
+    // Calculate returns based on execution mode
+    let ret = 0;
+    if (executionMode === 'close') {
+      // For close execution, use close-to-close returns
+      Object.keys(currentAllocation).forEach(tk => {
+        ret += currentAllocation[tk] * (series[tk][i].close / series[tk][i-1].close - 1);
+      });
+    } else {
+      // For open execution, use open-to-open returns
+      if (i > 1) {
+        Object.keys(currentAllocation).forEach(tk => {
+          ret += currentAllocation[tk] * (series[tk][i].open / series[tk][i-1].open - 1);
+        });
+      } else {
+        // For the first day, use previous close to current open
+        Object.keys(currentAllocation).forEach(tk => {
+          ret += currentAllocation[tk] * (series[tk][i].open / series[tk][i-1].close - 1);
+        });
+      }
+    }
     
-    let ret=0; Object.keys(weights).forEach(tk=> ret += weights[tk]*(series[tk][i].close/series[tk][i-1].close -1));
-    eq.push(eq[i-1]*(1+ret));
+    eq[i] = eq[i-1] * (1 + ret);
   }
   
   return {dates, equity:eq, tradeLog};
@@ -464,20 +574,49 @@ function runBarbell(aligned, userStartIndex = 0){
 function runLeveragedTrend(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const spyRSI = computeRSI(series['spy']);
-  const smaL=100, eq=[100];
+  const smaL = 100;
+  
+  // Get execution mode from toggle
+  const executionMode = document.getElementById('executionToggle').value;
+  
+  // Initialize equity array
+  const eq = [];
+  eq[userStartIndex] = 100;
   
   // Create trade log array
   const tradeLog = [];
   let currentAllocation = {};
   let initialAllocationDone = false;
   
-  for(let i=1;i<dates.length;i++){
-    if(i<smaL || spyRSI[i]===null){ eq.push(eq[i-1]); continue; }
+  // Calculate full equity curve but only start from userStartIndex
+  for(let i=1; i<dates.length; i++){
+    if(i <= userStartIndex) {
+      eq[i] = 100; // Initialize early values to 100
+      continue;
+    }
     
-    const spyClose=series['spy'][i].close, spySMA=sma(series['spy'],i,smaL);
-    const weights={};
+    // For days before we have enough history for indicators, just copy previous equity value
+    if(i < smaL || spyRSI[i] === null){ 
+      eq[i] = eq[i-1]; 
+      continue; 
+    }
     
-    if(spyClose<spySMA || spyRSI[i]<40){ weights['upro']=0; } else { weights['upro']=1; }
+    // Choose which price to use for execution
+    const priceKey = executionMode === 'close' ? 'close' : 'open';
+    
+    // Calculate SMA using close prices (standard)
+    const spySMA = sma(series['spy'], i, smaL);
+    
+    // But compare against current day's open or close price based on execution mode
+    const spyPrice = series['spy'][i][priceKey];
+    
+    // Calculate allocation
+    const weights = {};
+    if(spyPrice < spySMA || spyRSI[i] < 40){ 
+      weights['upro'] = 0; 
+    } else { 
+      weights['upro'] = 1; 
+    }
     
     // Handle initial allocation
     if (!initialAllocationDone && i >= smaL) {
@@ -489,25 +628,29 @@ function runLeveragedTrend(aligned, userStartIndex = 0){
         sells: [],
         buys: [],
         newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open",
         isInitial: true
       };
       
       // Record initial buys
       Object.keys(weights).forEach(tk => {
-        const buyAmount = eq[i-1] * weights[tk];
-        entry.buys.push({
-          ticker: tk,
-          price: series[tk][i].close.toFixed(2),
-          amount: formatCurrency(buyAmount),
-          shares: (buyAmount / series[tk][i].close).toFixed(2)
-        });
-        
-        // Add to new allocation
-        entry.newAllocation[tk] = {
-          weight: formatPercent(weights[tk]),
-          value: formatCurrency(eq[i-1] * weights[tk]),
-          price: series[tk][i].close.toFixed(2)
-        };
+        if (weights[tk] > 0) {
+          const buyAmount = eq[i-1] * weights[tk];
+          const price = series[tk][i][priceKey];
+          entry.buys.push({
+            ticker: tk,
+            price: price.toFixed(2),
+            amount: formatCurrency(buyAmount),
+            shares: (buyAmount / price).toFixed(2)
+          });
+          
+          // Add to new allocation
+          entry.newAllocation[tk] = {
+            weight: formatPercent(weights[tk]),
+            value: formatCurrency(eq[i-1] * weights[tk]),
+            price: price.toFixed(2)
+          };
+        }
       });
       
       tradeLog.push(entry);
@@ -522,51 +665,75 @@ function runLeveragedTrend(aligned, userStartIndex = 0){
         date: formatDate(dates[i]),
         sells: [],
         buys: [],
-        newAllocation: {}
+        newAllocation: {},
+        executionType: executionMode === 'close' ? "Close" : "Open"
       };
       
       // Record sells
       Object.keys(currentAllocation).forEach(tk => {
         if (!weights[tk] || weights[tk] < currentAllocation[tk]) {
           const sellAmount = portfolioValue * (weights[tk] || 0) - portfolioValue * currentAllocation[tk];
+          const price = series[tk][i][priceKey];
           entry.sells.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(Math.abs(sellAmount)),
-            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+            shares: Math.abs(sellAmount / price).toFixed(2)
           });
         }
       });
       
       // Record buys
       Object.keys(weights).forEach(tk => {
-        if (!currentAllocation[tk] || weights[tk] > currentAllocation[tk]) {
+        if (weights[tk] > 0 && (!currentAllocation[tk] || weights[tk] > currentAllocation[tk])) {
           const buyAmount = portfolioValue * weights[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          const price = series[tk][i][priceKey];
           entry.buys.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(buyAmount),
-            shares: (buyAmount / series[tk][i].close).toFixed(2)
+            shares: (buyAmount / price).toFixed(2)
           });
         }
       });
       
       // Record new allocation
       Object.keys(weights).forEach(tk => {
-        entry.newAllocation[tk] = {
-          weight: formatPercent(weights[tk]),
-          value: formatCurrency(portfolioValue * weights[tk]),
-          price: series[tk][i].close.toFixed(2)
-        };
+        if (weights[tk] > 0) {
+          const price = series[tk][i][priceKey];
+          entry.newAllocation[tk] = {
+            weight: formatPercent(weights[tk]),
+            value: formatCurrency(portfolioValue * weights[tk]),
+            price: price.toFixed(2)
+          };
+        }
       });
       
       tradeLog.push(entry);
     }
     
-    currentAllocation = {...weights};
+    // Calculate returns based on execution mode
+    let ret = 0;
+    if (executionMode === 'close') {
+      // For close execution, use close-to-close returns
+      Object.keys(weights).forEach(tk => {
+        ret += weights[tk] * (series[tk][i].close / series[tk][i-1].close - 1);
+      });
+    } else {
+      // For open execution, use open-to-open returns
+      if (i > 1) {
+        Object.keys(weights).forEach(tk => {
+          ret += weights[tk] * (series[tk][i].open / series[tk][i-1].open - 1);
+        });
+      } else {
+        // For the first day, use previous close to current open
+        Object.keys(weights).forEach(tk => {
+          ret += weights[tk] * (series[tk][i].open / series[tk][i-1].close - 1);
+        });
+      }
+    }
     
-    let ret=0; Object.keys(weights).forEach(tk=> ret += weights[tk]*(series[tk][i].close/series[tk][i-1].close -1));
-    eq.push(eq[i-1]*(1+ret));
+    eq[i] = eq[i-1] * (1 + ret);
   }
   
   return {dates, equity:eq, tradeLog};
@@ -575,29 +742,63 @@ function runLeveragedTrend(aligned, userStartIndex = 0){
 function runTurbo(aligned, userStartIndex = 0){
   const {dates, series} = aligned;
   const universe = Object.keys(series).filter(tk => !['spy','tlt','tmf','shy'].includes(tk));
-  const spy=series['spy']; const spyRSI = computeRSI(spy);
-  const smaL=200, perfW=21, liqThresh=5e6, eq=[100];
+  const spy = series['spy']; 
+  const spyRSI = computeRSI(spy);
+  const smaL = 200, perfW = 21, liqThresh = 5e6;
+  
+  // Get execution mode from toggle
+  const executionMode = document.getElementById('executionToggle').value;
+  
+  // Initialize equity array
+  const eq = [];
+  eq[userStartIndex] = 100;
   
   // Create trade log array
   const tradeLog = [];
   let currentAllocation = {};
   let initialAllocationDone = false;
 
-  for(let i=1;i<dates.length;i++){
-    if(i<Math.max(smaL,perfW)){ eq.push(eq[i-1]); continue; }
-    let riskOn = spy[i].close > sma(spy,i,smaL) && spyRSI[i] >= 45;
+  // Calculate full equity curve but only start from userStartIndex
+  for(let i=1; i<dates.length; i++){
+    if(i <= userStartIndex) {
+      eq[i] = 100; // Initialize early values to 100
+      continue;
+    }
+    
+    // For days before we have enough history for indicators, just copy previous equity value
+    if(i < Math.max(smaL, perfW)){ 
+      eq[i] = eq[i-1]; 
+      continue; 
+    }
+    
+    // Choose which price to use for execution
+    const priceKey = executionMode === 'close' ? 'close' : 'open';
+    
+    // Use standard SMA calculation based on close prices
+    const spySMA = sma(spy, i, smaL);
+    
+    // But compare against current day's open or close price based on execution mode
+    const spyPrice = spy[i][priceKey];
+    
+    let riskOn = spyPrice > spySMA && spyRSI[i] >= 45;
 
     // liquid tradables
-    let tradables = universe.filter(tk=> series[tk] && series[tk][i]);
-    tradables = tradables.filter(tk=> avgDollarVol(series[tk], i, 20) > liqThresh);
+    let tradables = universe.filter(tk => series[tk] && series[tk][i]);
+    tradables = tradables.filter(tk => avgDollarVol(series[tk], i, 20) > liqThresh);
 
-    tradables.sort((a,b)=> series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close);
+    // Sort by momentum using closing prices (standard)
+    tradables.sort((a,b) => 
+      series[b][i].close/series[b][i-perfW].close - series[a][i].close/series[a][i-perfW].close
+    );
 
-    if(riskOn && tradables.length<2) riskOn=false; // no liquid names => risk off
+    if(riskOn && tradables.length < 2) riskOn = false; // no liquid names => risk off
 
     let longs;
-    if(riskOn){ longs = tradables.slice(0,2); }
-    else       { longs = ['tmf','shy']; }
+    if(riskOn){ 
+      longs = tradables.slice(0,2); 
+    } else { 
+      longs = ['tmf','shy']; 
+    }
 
     const w = 1/longs.length;
     
@@ -616,24 +817,26 @@ function runTurbo(aligned, userStartIndex = 0){
         buys: [],
         newAllocation: {},
         riskOn: riskOn,
+        executionType: executionMode === 'close' ? "Close" : "Open",
         isInitial: true
       };
       
       // Record initial buys
       longs.forEach(tk => {
         const buyAmount = eq[i-1] * w;
+        const price = series[tk][i][priceKey];
         entry.buys.push({
           ticker: tk,
-          price: series[tk][i].close.toFixed(2),
+          price: price.toFixed(2),
           amount: formatCurrency(buyAmount),
-          shares: (buyAmount / series[tk][i].close).toFixed(2)
+          shares: (buyAmount / price).toFixed(2)
         });
         
         // Add to new allocation
         entry.newAllocation[tk] = {
           weight: formatPercent(w),
           value: formatCurrency(eq[i-1] * w),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
@@ -650,18 +853,20 @@ function runTurbo(aligned, userStartIndex = 0){
         sells: [],
         buys: [],
         newAllocation: {},
-        riskOn: riskOn
+        riskOn: riskOn,
+        executionType: executionMode === 'close' ? "Close" : "Open"
       };
       
       // Record sells
       Object.keys(currentAllocation).forEach(tk => {
         if (!newAllocation[tk] || newAllocation[tk] < currentAllocation[tk]) {
           const sellAmount = portfolioValue * (newAllocation[tk] || 0) - portfolioValue * currentAllocation[tk];
+          const price = series[tk][i][priceKey];
           entry.sells.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(Math.abs(sellAmount)),
-            shares: Math.abs(sellAmount / series[tk][i].close).toFixed(2)
+            shares: Math.abs(sellAmount / price).toFixed(2)
           });
         }
       });
@@ -670,21 +875,23 @@ function runTurbo(aligned, userStartIndex = 0){
       Object.keys(newAllocation).forEach(tk => {
         if (!currentAllocation[tk] || newAllocation[tk] > currentAllocation[tk]) {
           const buyAmount = portfolioValue * newAllocation[tk] - portfolioValue * (currentAllocation[tk] || 0);
+          const price = series[tk][i][priceKey];
           entry.buys.push({
             ticker: tk,
-            price: series[tk][i].close.toFixed(2),
+            price: price.toFixed(2),
             amount: formatCurrency(buyAmount),
-            shares: (buyAmount / series[tk][i].close).toFixed(2)
+            shares: (buyAmount / price).toFixed(2)
           });
         }
       });
       
       // Record new allocation
       longs.forEach(tk => {
+        const price = series[tk][i][priceKey];
         entry.newAllocation[tk] = {
           weight: formatPercent(w),
           value: formatCurrency(portfolioValue * w),
-          price: series[tk][i].close.toFixed(2)
+          price: price.toFixed(2)
         };
       });
       
@@ -693,9 +900,28 @@ function runTurbo(aligned, userStartIndex = 0){
     
     currentAllocation = {...newAllocation};
     
+    // Calculate returns based on execution mode
     let ret = 0;
-    longs.forEach(tk=> ret += w*(series[tk][i].close/series[tk][i-1].close -1));
-    eq.push(eq[i-1]*(1+ret));
+    if (executionMode === 'close') {
+      // For close execution, use close-to-close returns
+      longs.forEach(tk => {
+        ret += w * (series[tk][i].close / series[tk][i-1].close - 1);
+      });
+    } else {
+      // For open execution, use open-to-open returns
+      if (i > 1) {
+        longs.forEach(tk => {
+          ret += w * (series[tk][i].open / series[tk][i-1].open - 1);
+        });
+      } else {
+        // For the first day, use previous close to current open
+        longs.forEach(tk => {
+          ret += w * (series[tk][i].open / series[tk][i-1].close - 1);
+        });
+      }
+    }
+    
+    eq[i] = eq[i-1] * (1 + ret);
   }
   
   return {dates, equity:eq, tradeLog};
