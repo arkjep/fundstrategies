@@ -3,6 +3,14 @@ const { signalDMR } = require('./dmr');
 const { signalBarbell } = require('./barbell');
 const { signalTrend } = require('./trend');
 const { signalTurbo } = require('./turbo');
+const { signalApex } = require('./apex');
+
+const APEX_TICKERS = [
+  'spy', 'qqq', 'iwm', 'shy', 'gld',
+  'tqqq', 'upro', 'soxl', 'tecl', 'fngu', 'labu', 'webl', 'retl', 'want', 'dfen', 'udow',
+];
+
+const APEX_RESERVED = new Set(['spy', 'qqq', 'iwm', 'shy', 'gld', 'tlt', 'tmf', 'splv']);
 
 const STRATEGY_CONFIG = {
   dmr: {
@@ -21,6 +29,10 @@ const STRATEGY_CONFIG = {
     tickers: ['soxl', 'tecl', 'fngu', 'tqqq', 'upro', 'labu', 'webl', 'retl', 'want', 'dfen', 'udow', 'tmf', 'shy', 'spy', 'tlt'],
     lookback: 200,
   },
+  apex: {
+    tickers: APEX_TICKERS,
+    lookback: 280,
+  },
 };
 
 const SIGNAL_BY_STRATEGY = {
@@ -28,6 +40,7 @@ const SIGNAL_BY_STRATEGY = {
   barbell: signalBarbell,
   trend: signalTrend,
   turbo: signalTurbo,
+  apex: signalApex,
 };
 
 function computeSignal(ctx) {
@@ -41,6 +54,10 @@ function buildStrategyState(strategy, series) {
 
   if (strategy === 'turbo') {
     state.turboUniverse = Object.keys(series).filter((tk) => !['spy', 'tlt', 'tmf', 'shy'].includes(tk));
+  }
+
+  if (strategy === 'apex') {
+    state.apexUniverse = Object.keys(series).filter((tk) => !APEX_RESERVED.has(tk));
   }
 
   return state;

@@ -20,12 +20,57 @@ function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate
     }
   }
 
+  let apexAdvancedStart = null;
+  if (strategy === 'apex') {
+    const required = new Set(['spy', 'qqq', 'iwm', 'shy', 'gld']);
+    let cutoff = analysisStartDate || startDate;
+
+    const buildSet = (effectiveCutoff) => {
+      const out = {};
+      for (const tk of STRATEGY_CONFIG.apex.tickers) {
+        if (!byTicker[tk]) continue;
+        const arr = sliceByDate(byTicker[tk], startDate, endDate);
+        if (arr.length < 250) continue;
+        if (!required.has(tk) && arr[0].date > effectiveCutoff) continue;
+        out[tk] = arr;
+      }
+      return out;
+    };
+
+    let working = buildSet(cutoff);
+    let candidates = Object.keys(working).filter((tk) => !required.has(tk));
+
+    // If the chosen window is too early to contain enough leveraged ETFs,
+    // auto-advance the analysis start so the strategy actually has something
+    // to rotate into instead of sitting in SHY/GLD forever.
+    const minCandidates = 4;
+    if (candidates.length < minCandidates) {
+      const inceptions = STRATEGY_CONFIG.apex.tickers
+        .filter((tk) => !required.has(tk) && byTicker[tk] && byTicker[tk].length >= 250)
+        .map((tk) => byTicker[tk][0].date)
+        .sort((a, b) => a - b);
+      if (inceptions.length >= minCandidates) {
+        cutoff = inceptions[minCandidates - 1];
+        // ~252 trading days ≈ 366 calendar days of warmup before signals fire.
+        apexAdvancedStart = new Date(cutoff.getTime() + 366 * 24 * 60 * 60 * 1000);
+        working = buildSet(cutoff);
+      }
+    }
+
+    for (const tk of Object.keys(normalizedByTicker)) delete normalizedByTicker[tk];
+    Object.assign(normalizedByTicker, working);
+  }
+
   const aligned = alignSeries(normalizedByTicker);
   if (aligned.dates.length < 3) {
     throw new Error('Not enough aligned data to run backtest');
   }
 
-  const effectiveAnalysisStart = analysisStartDate || startDate;
+  const effectiveAnalysisStart = (() => {
+    const base = analysisStartDate || startDate;
+    if (apexAdvancedStart && apexAdvancedStart > base) return apexAdvancedStart;
+    return base;
+  })();
   const userStartIndex = aligned.dates.findIndex((date) => date >= effectiveAnalysisStart);
   if (userStartIndex < 0) {
     throw new Error('Start date is outside available aligned data');
@@ -220,13 +265,21 @@ function sliceByDate(arr, startDate, endDate) {
 }
 
 function calculateStats(equity) {
-  const days = equity.length;
-  const cagr = calcCAGR(equity, days);
-  const maxDD = calcMaxDD(equity);
+  // Trim leading undefined / pre-analysis padding so we measure the actual run.
+  const firstIdx = equity.findIndex((v) => Number.isFinite(v));
+  const trimmed = firstIdx >= 0 ? equity.slice(firstIdx).filter((v) => Number.isFinite(v)) : [];
+
+  if (trimmed.length < 2) {
+    return { annualizedReturn: 0, maxDrawdown: 0, sharpe: 0, sortino: 0, calmar: 0 };
+  }
+
+  const days = trimmed.length;
+  const cagr = calcCAGR(trimmed, days);
+  const maxDD = calcMaxDD(trimmed);
   const dailyRet = [];
 
-  for (let i = 1; i < equity.length; i += 1) {
-    dailyRet.push(equity[i] / equity[i - 1] - 1);
+  for (let i = 1; i < trimmed.length; i += 1) {
+    dailyRet.push(trimmed[i] / trimmed[i - 1] - 1);
   }
 
   const avgRet = dailyRet.reduce((s, r) => s + r, 0) / dailyRet.length;
