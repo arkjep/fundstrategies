@@ -4,13 +4,18 @@ const { signalBarbell } = require('./barbell');
 const { signalTrend } = require('./trend');
 const { signalTurbo } = require('./turbo');
 const { signalApex } = require('./apex');
+const { signalTempest } = require('./tempest');
+const { signalFusion } = require('./fusion');
 
 const APEX_TICKERS = [
   'spy', 'qqq', 'iwm', 'shy', 'gld',
   'tqqq', 'upro', 'soxl', 'tecl', 'fngu', 'labu', 'webl', 'retl', 'want', 'dfen', 'udow',
+  // inverse leveraged ETFs (bear-regime ammo)
+  'sqqq', 'spxu', 'sdow', 'srty', 'soxs', 'tza',
 ];
 
 const APEX_RESERVED = new Set(['spy', 'qqq', 'iwm', 'shy', 'gld', 'tlt', 'tmf', 'splv']);
+const APEX_INVERSE = new Set(['sqqq', 'spxu', 'sdow', 'srty', 'soxs', 'tza']);
 
 const STRATEGY_CONFIG = {
   dmr: {
@@ -33,6 +38,14 @@ const STRATEGY_CONFIG = {
     tickers: APEX_TICKERS,
     lookback: 280,
   },
+  tempest: {
+    tickers: ['spy', 'shy', 'gld', 'tqqq', 'upro', 'uvxy', 'svxy'],
+    lookback: 280,
+  },
+  fusion: {
+    tickers: Array.from(new Set([...APEX_TICKERS, 'uvxy', 'svxy'])),
+    lookback: 280,
+  },
 };
 
 const SIGNAL_BY_STRATEGY = {
@@ -41,6 +54,8 @@ const SIGNAL_BY_STRATEGY = {
   trend: signalTrend,
   turbo: signalTurbo,
   apex: signalApex,
+  tempest: signalTempest,
+  fusion: signalFusion,
 };
 
 function computeSignal(ctx) {
@@ -57,7 +72,15 @@ function buildStrategyState(strategy, series) {
   }
 
   if (strategy === 'apex') {
-    state.apexUniverse = Object.keys(series).filter((tk) => !APEX_RESERVED.has(tk));
+    const all = Object.keys(series);
+    state.apexUniverse = all.filter((tk) => !APEX_RESERVED.has(tk) && !APEX_INVERSE.has(tk));
+    state.apexBearUniverse = all.filter((tk) => APEX_INVERSE.has(tk));
+  }
+
+  if (strategy === 'fusion') {
+    const all = Object.keys(series);
+    state.apexUniverse = all.filter((tk) => !APEX_RESERVED.has(tk) && !APEX_INVERSE.has(tk) && !['uvxy','svxy'].includes(tk));
+    state.apexBearUniverse = all.filter((tk) => APEX_INVERSE.has(tk));
   }
 
   return state;

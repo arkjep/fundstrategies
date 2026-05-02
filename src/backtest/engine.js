@@ -1,6 +1,6 @@
 const { STRATEGY_CONFIG, computeSignal, buildStrategyState } = require('./strategies');
 
-function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate, executionMode }) {
+function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate, executionMode, strategyParams }) {
   if (!STRATEGY_CONFIG[strategy]) {
     throw new Error(`Unknown strategy: ${strategy}`);
   }
@@ -21,13 +21,13 @@ function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate
   }
 
   let apexAdvancedStart = null;
-  if (strategy === 'apex') {
+  if (strategy === 'apex' || strategy === 'fusion') {
     const required = new Set(['spy', 'qqq', 'iwm', 'shy', 'gld']);
     let cutoff = analysisStartDate || startDate;
 
     const buildSet = (effectiveCutoff) => {
       const out = {};
-      for (const tk of STRATEGY_CONFIG.apex.tickers) {
+      for (const tk of STRATEGY_CONFIG[strategy].tickers) {
         if (!byTicker[tk]) continue;
         const arr = sliceByDate(byTicker[tk], startDate, endDate);
         if (arr.length < 250) continue;
@@ -40,18 +40,14 @@ function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate
     let working = buildSet(cutoff);
     let candidates = Object.keys(working).filter((tk) => !required.has(tk));
 
-    // If the chosen window is too early to contain enough leveraged ETFs,
-    // auto-advance the analysis start so the strategy actually has something
-    // to rotate into instead of sitting in SHY/GLD forever.
     const minCandidates = 4;
     if (candidates.length < minCandidates) {
-      const inceptions = STRATEGY_CONFIG.apex.tickers
+      const inceptions = STRATEGY_CONFIG[strategy].tickers
         .filter((tk) => !required.has(tk) && byTicker[tk] && byTicker[tk].length >= 250)
         .map((tk) => byTicker[tk][0].date)
         .sort((a, b) => a - b);
       if (inceptions.length >= minCandidates) {
         cutoff = inceptions[minCandidates - 1];
-        // ~252 trading days ≈ 366 calendar days of warmup before signals fire.
         apexAdvancedStart = new Date(cutoff.getTime() + 366 * 24 * 60 * 60 * 1000);
         working = buildSet(cutoff);
       }
@@ -77,6 +73,9 @@ function runBacktest({ strategy, byTicker, startDate, analysisStartDate, endDate
   }
 
   const state = buildStrategyState(strategy, aligned.series);
+  if (strategy === 'apex' && strategyParams) {
+    state.apexParams = strategyParams;
+  }
   const result = runCausalSimulation({
     strategy,
     aligned,
