@@ -155,8 +155,11 @@ function formatPercent(value) {
 }
 
 async function fetchTicker(tk){
-  const r = await fetch(`proxy.php?symbol=${tk}.us`);
-  if(!r.ok) throw new Error('fetch ' + tk);
+  const r = await fetch(`/api/history?symbol=${tk}.us`);
+  if(!r.ok) {
+    const msg = await r.text();
+    throw new Error(`fetch ${tk}: ${r.status} ${msg}`);
+  }
   return csvToSeries(await r.text());
 }
 
@@ -172,14 +175,15 @@ async function fetchTickerWithRetry(tk, maxRetries = 3, delay = 1000) {
       }
       
       // Modified to fetch more historical data than needed to ensure enough for indicators
-      const r = await fetch(`proxy.php?symbol=${tk}.us`);
+      const r = await fetch(`/api/history?symbol=${tk}.us`);
       if (!r.ok) {
         if (r.status === 502) {
           console.warn(`Rate limited for ${tk}, retrying in ${delay}ms...`);
           retries++;
           continue;
         }
-        throw new Error('fetch ' + tk);
+        const msg = await r.text();
+        throw new Error(`fetch ${tk}: ${r.status} ${msg}`);
       }
       return csvToSeries(await r.text());
     } catch (err) {

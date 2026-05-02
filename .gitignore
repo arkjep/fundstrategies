@@ -1,3 +1,11 @@
 # Ignore cache folder and all contents
 /cache/
 /cache/*
+
+# Node
+/node_modules/
+npm-debug.log*
+
+# Environment
+.env
+.env.local
