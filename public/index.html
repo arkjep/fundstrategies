@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fund Strategies</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <h1>Fund Strategies</h1>
+      <p>Server-side causal backtests with one-bar signal lag.</p>
+    </header>
+
+    <section class="panel controls">
+      <label class="field strategy-field">
+        Strategy
+        <select id="strategySelect">
+          <option value="dmr">1 - Dual Momentum Rotation</option>
+          <option value="barbell">2 - Leveraged 60/40 Barbell Trend</option>
+          <option value="trend">2.1 - Leveraged Trend</option>
+          <option value="turbo">3 - Turbo Triple-Momentum Stack</option>
+        </select>
+      </label>
+
+      <label class="field">
+        Start
+        <input type="date" id="startDate" value="1993-01-29" />
+      </label>
+
+      <label class="field">
+        End
+        <input type="date" id="endDate" />
+      </label>
+
+      <label class="field">
+        Execution
+        <select id="executionToggle">
+          <option value="close">Close-to-Close</option>
+          <option value="open">Open-to-Open</option>
+        </select>
+      </label>
+
+      <button id="runBtn">Run Backtest</button>
+    </section>
+
+    <section class="panel stats" id="stats">Run a backtest to view metrics.</section>
+
+    <section class="panel chart-panel">
+      <canvas id="equityChart"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Trade Log</h2>
+      <div id="tradeLog" class="trade-log">No trades yet.</div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
